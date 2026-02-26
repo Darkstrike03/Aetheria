@@ -1,0 +1,8 @@
+beautifulsoup4
+requests
+keras
+tensorflow
+numpy
+torch>=1.13.0
+sentencepiece
+tqdm

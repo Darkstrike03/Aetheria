@@ -1,0 +1,50 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# PyTorch checkpoints / models
+models/
+*.pt
+*.pth
+*.ckpt
+
+# Tokenizers and raw scraped data
+data/*.model
+data/*.vocab
+data/conversations.txt
+data/*.bin
+data/*.npy
+
+# Logs and runtime files
+logs/
+*.log
+
+# IDE/editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/

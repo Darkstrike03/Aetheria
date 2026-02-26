@@ -1,0 +1,19 @@
+Business Source License 1.1 (summary)
+
+Copyright (c) 2026 AetheriaAI
+
+This repository is released under the Business Source License 1.1 (BSL 1.1).
+
+Summary:
+- Source is available for inspection and non-production use.
+- Commercial or production use is prohibited until the Change Date.
+- Change Date: 2029-02-26 — on or after this date the software will be licensed under the Apache License, Version 2.0.
+
+This file is a short summary for convenience. For the full, legally binding
+text of BSL 1.1 please consult: https://mariadb.com/bsl11/
+
+NOTE: This license applies to the source code in this repository. Model
+weights, datasets, and any released binaries may be governed by separate
+licenses (see README_LICENSE.md).
+
+THIS SUMMARY IS NOT LEGAL ADVICE.
