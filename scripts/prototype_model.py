@@ -16,6 +16,7 @@ import os
 import math
 import random
 from pathlib import Path
+import argparse
 
 import torch
 import torch.nn as nn
@@ -90,7 +91,7 @@ class TinyTransformerLM(nn.Module):
         super().__init__()
         self.token_emb = nn.Embedding(vocab_size, d_model)
         self.pos_enc = PositionalEncoding(d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_ff, dropout=dropout)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_ff, dropout=dropout, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.ln = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size)
@@ -165,42 +166,83 @@ def collate_fn(batch):
     return x, y
 
 
-def train_loop(model, dataloader, optimizer, device, epochs=3, log_every=50):
+def _save_checkpoint(model, out_dir: Path, sp, vocab_size, step=None, epoch=None):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = out_dir / (f"aetheria_ckpt_step{step}.pt" if step is not None else "aetheria_ckpt.pt")
+    tok_meta = {}
+    try:
+        from shutil import copy2
+        if hasattr(sp, 'char2id'):
+            tok_path = out_dir / 'tokenizer_char.json'
+            import json
+            json.dump({'type': 'char', 'char2id': sp.char2id}, open(tok_path, 'w', encoding='utf-8'))
+            tok_meta = {'type': 'char', 'path': str(tok_path)}
+        else:
+            spm_src = Path(__file__).parents[1] / 'data' / 'spm.model'
+            spm_vocab = Path(__file__).parents[1] / 'data' / 'spm.vocab'
+            if spm_src.exists():
+                copy2(spm_src, out_dir / 'spm.model')
+                tok_meta = {'type': 'spm', 'path': str(out_dir / 'spm.model')}
+                if spm_vocab.exists():
+                    copy2(spm_vocab, out_dir / 'spm.vocab')
+    except Exception:
+        tok_meta = {}
+
+    torch.save({'model_state_dict': model.state_dict(), 'vocab_size': vocab_size, 'tokenizer': tok_meta, 'step': step, 'epoch': epoch}, ckpt_path)
+    # also write latest
+    copy_latest = out_dir / 'aetheria_latest.pt'
+    try:
+        copy2(ckpt_path, copy_latest)
+    except Exception:
+        pass
+
+
+def train_loop(model, dataloader, optimizer, device, epochs=3, log_every=50, save_every_steps: int = 0, save_dir: Path = None, sp=None, vocab_size=None):
     model.train()
     criterion = nn.CrossEntropyLoss(ignore_index=0)
     global_step = 0
-    for epoch in range(epochs):
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
-        for x, y in pbar:
-            x = x.to(device)
-            y = y.to(device)
-            logits = model(x)
-            loss = criterion(logits.view(-1, logits.size(-1)), y.view(-1))
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            global_step += 1
-            if global_step % log_every == 0:
-                pbar.set_postfix(loss=loss.item())
+    try:
+        for epoch in range(epochs):
+            pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
+            for x, y in pbar:
+                x = x.to(device)
+                y = y.to(device)
+                logits = model(x)
+                loss = criterion(logits.view(-1, logits.size(-1)), y.view(-1))
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                global_step += 1
+                if global_step % log_every == 0:
+                    pbar.set_postfix(loss=loss.item())
+                if save_every_steps and save_every_steps > 0 and global_step % save_every_steps == 0 and save_dir is not None:
+                    print(f"Saving checkpoint at step {global_step}...")
+                    _save_checkpoint(model, save_dir, sp, vocab_size, step=global_step, epoch=epoch+1)
+    except KeyboardInterrupt:
+        print('\nTraining interrupted by user; saving current checkpoint...')
+        if save_dir is not None:
+            _save_checkpoint(model, save_dir, sp, vocab_size, step=global_step, epoch=epoch+1)
+        print('Saved interrupt checkpoint. Exiting training loop.')
+        return
 
 
-def main():
-    if not DATA_PATH.exists():
+def main(data_path: Path = DATA_PATH, sp_model: Path = SP_MODEL, vocab_size_arg: int = 4000, seq_len: int = 128, batch_size: int = 8, epochs: int = 3, device_str: str = None):
+    if not data_path.exists():
         print("No data found. Please provide `data/cleaned_conversations.txt` (one conversation per paragraph).")
         return
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(device_str if device_str else ('cuda' if torch.cuda.is_available() else 'cpu'))
     print('Device:', device)
 
-    sp = build_or_load_spm(DATA_PATH, SP_MODEL, vocab_size=4000)
+    sp = build_or_load_spm(data_path, sp_model, vocab_size=vocab_size_arg)
     vocab_size = len(sp)
 
-    tokens = prepare_data(sp, DATA_PATH, seq_len=128)
+    tokens = prepare_data(sp, data_path, seq_len=seq_len)
     # allow smaller datasets but warn the user; reduce threshold so tiny prototypes can run
     if len(tokens) < 128:
         print('Corpus too small for SPM-based training; switching to char-level fallback.')
         # build simple char tokenizer from raw text and rebuild tokens
-        raw = DATA_PATH.read_text(encoding='utf-8')
+        raw = data_path.read_text(encoding='utf-8')
         char_tok = SimpleCharTokenizer(raw)
         # build tokens as concatenation of encoded lines with eos
         tokens = []
@@ -213,47 +255,40 @@ def main():
             print('Warning: small dataset (less than 512 tokens). Training may be unstable.')
         vocab_size = len(sp)
 
-    seq_len = 128
     # create sliding windows
     sequences = [tokens[i:i + seq_len] for i in range(0, max(1, len(tokens) - seq_len), seq_len)]
     # pad last sequence if needed
     sequences = [s if len(s) == seq_len else s + [0] * (seq_len - len(s)) for s in sequences]
 
     dataset = TextDataset([item for seq in sequences for item in seq], seq_len=seq_len)
-    batch_size = 8
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
     model = TinyTransformerLM(vocab_size=vocab_size, d_model=256, nhead=4, num_layers=4, dim_ff=1024).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
-    train_loop(model, dataloader, optimizer, device, epochs=3, log_every=20)
-
+    # handle resume
     out_dir = Path(__file__).parents[1] / "models"
     out_dir.mkdir(exist_ok=True)
-    # save tokenizer alongside model so inference can rebuild the exact mapping
-    tok_meta = {}
-    try:
-        from shutil import copy2
-        if hasattr(sp, 'char2id'):
-            tok_path = out_dir / 'tokenizer_char.json'
-            import json
-            json.dump({'type': 'char', 'char2id': sp.char2id}, open(tok_path, 'w', encoding='utf-8'))
-            tok_meta = {'type': 'char', 'path': str(tok_path)}
-        else:
-            # assume SentencePieceProcessor
-            spm_src = Path(__file__).parents[1] / 'data' / 'spm.model'
-            spm_vocab = Path(__file__).parents[1] / 'data' / 'spm.vocab'
-            if spm_src.exists():
-                copy2(spm_src, out_dir / 'spm.model')
-                tok_meta = {'type': 'spm', 'path': str(out_dir / 'spm.model')}
-                if spm_vocab.exists():
-                    copy2(spm_vocab, out_dir / 'spm.vocab')
-    except Exception:
-        tok_meta = {}
+    if hasattr(sp, 'char2id'):
+        tok_for_saving = sp
+    else:
+        tok_for_saving = sp
 
-    torch.save({'model_state_dict': model.state_dict(), 'vocab_size': vocab_size, 'tokenizer': tok_meta}, out_dir / 'aetheria_tiny.pt')
-    print('Saved model to', out_dir / 'aetheria_tiny.pt')
+    train_loop(model, dataloader, optimizer, device, epochs=epochs, log_every=20, save_every_steps=0, save_dir=out_dir, sp=tok_for_saving, vocab_size=vocab_size)
+
+    # final save at end of training
+    _save_checkpoint(model, out_dir, tok_for_saving, vocab_size, step='final', epoch=epochs)
+    print('Saved model to', out_dir / 'aetheria_ckpt_stepfinal.pt')
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', type=str, default=str(DATA_PATH))
+    parser.add_argument('--spm', type=str, default=str(SP_MODEL))
+    parser.add_argument('--vocab_size', type=int, default=4000)
+    parser.add_argument('--seq_len', type=int, default=128)
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--device', type=str, default=None)
+    args = parser.parse_args()
+    main(data_path=Path(args.data), sp_model=Path(args.spm), vocab_size_arg=args.vocab_size, seq_len=args.seq_len, batch_size=args.batch_size, epochs=args.epochs, device_str=args.device)

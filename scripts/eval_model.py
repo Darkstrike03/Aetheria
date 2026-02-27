@@ -48,7 +48,7 @@ class TinyTransformerLM(nn.Module):
         super().__init__()
         self.token_emb = nn.Embedding(vocab_size, d_model)
         self.pos_enc = PositionalEncoding(d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_ff, dropout=dropout)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_ff, dropout=dropout, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.ln = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size)
@@ -63,13 +63,63 @@ class TinyTransformerLM(nn.Module):
         return logits
 
 
-def top_k_sample(logits, k=50, temperature=1.0):
-    if temperature <= 0:
+def sample_from_logits(logits, generated_ids=None, top_k=0, top_p=1.0, temperature=1.0, repetition_penalty=1.0):
+    """Sample a token id from logits with top-k, top-p (nucleus), temperature and repetition penalty.
+
+    logits: 1D torch tensor
+    generated_ids: list of previously generated ids (for repetition penalty)
+    top_k: int, if >0 use top-k
+    top_p: float in (0,1], if <1 use nucleus sampling
+    temperature: float, if <=0 use greedy argmax
+    repetition_penalty: float >=1.0, penalize tokens already generated
+    """
+    logits = logits.clone()
+    if generated_ids and repetition_penalty != 1.0:
+        for gid in set(generated_ids):
+            if 0 <= gid < logits.size(0):
+                if logits[gid] < 0:
+                    logits[gid] = logits[gid] * repetition_penalty
+                else:
+                    logits[gid] = logits[gid] / repetition_penalty
+
+    if temperature <= 0 or (top_k == 1 and top_p >= 1.0):
         return int(torch.argmax(logits).item())
-    vals, indices = torch.topk(logits, k)
-    probs = torch.nn.functional.softmax(vals / temperature, dim=-1)
-    idx = torch.multinomial(probs, num_samples=1).item()
-    return int(indices[idx].item())
+
+    logits = logits / max(temperature, 1e-8)
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+
+    # top-p (nucleus) sampling
+    if top_p is not None and 0.0 < top_p < 1.0:
+        sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=0)
+        # mask tokens beyond the nucleus
+        keep = cumulative_probs <= top_p
+        # always keep at least the first token
+        if not keep.any():
+            keep[0] = True
+        # build masked probs
+        mask = torch.zeros_like(probs, dtype=torch.bool)
+        mask[sorted_indices[keep]] = True
+        filtered_probs = probs * mask.float()
+        if filtered_probs.sum() <= 0:
+            filtered_probs = probs
+        probs = filtered_probs / filtered_probs.sum()
+        next_id = int(torch.multinomial(probs, num_samples=1).item())
+        return next_id
+
+    # fallback to top-k if specified
+    if top_k is not None and top_k > 0:
+        vals, indices = torch.topk(probs, top_k)
+        if vals.sum().item() == 0:
+            # fallback to full distribution
+            idx = int(torch.multinomial(probs, num_samples=1).item())
+            return idx
+        local_probs = vals / vals.sum()
+        pick = int(indices[torch.multinomial(local_probs, num_samples=1).item()].item())
+        return pick
+
+    # default: sample from full distribution
+    return int(torch.multinomial(probs, num_samples=1).item())
 
 
 def build_tokenizer(data_path: Path, spm_path: Path):
@@ -88,7 +138,9 @@ def main():
     parser.add_argument('--spm', type=str, default='data/spm.model')
     parser.add_argument('--max_new_tokens', type=int, default=100)
     parser.add_argument('--top_k', type=int, default=50)
+    parser.add_argument('--top_p', type=float, default=1.0, help='Nucleus sampling cumulative probability (0-1).')
     parser.add_argument('--temperature', type=float, default=1.0)
+    parser.add_argument('--repetition_penalty', type=float, default=1.0, help='Penalty >1.0 reduces probability of repeating same tokens')
     args = parser.parse_args()
 
     ckpt_path = Path(args.ckpt)
@@ -167,7 +219,7 @@ def main():
             with torch.no_grad():
                 logits = model(x)
             next_logits = logits[0, -1]
-            next_id = top_k_sample(next_logits, k=args.top_k, temperature=args.temperature)
+            next_id = sample_from_logits(next_logits, generated_ids=ids, top_k=args.top_k, top_p=args.top_p, temperature=args.temperature, repetition_penalty=args.repetition_penalty)
             ids.append(next_id)
 
         if isinstance(tok, SimpleCharTokenizer):
