@@ -48,18 +48,39 @@ def _python(*args):
 
 # ── pipeline stages ───────────────────────────────────────────────────────────
 
-def envy(provider: str = "groq", rounds: int = 10):
-    """Call free AI APIs and save (prompt, response) pairs — runs locally."""
-    print("=== [ENVY] Calling free AI APIs ===")
+def envy(provider: str = "groq", rounds: int = 10, mode: str = "collect",
+         ckpt: str = ""):
+    """Call free AI APIs and save (prompt, response) pairs — runs locally.
+    Use mode='teach' to question Aetheria interactively instead of an API."""
     envy_script = ROOT / "Original_sin" / "envy" / "envy.py"
-    _run(_python(envy_script, "--provider", provider, "--rounds", str(rounds)))
+    if mode == "teach":
+        print("=== [ENVY] Teach mode — questioning Aetheria locally ===")
+        cmd = _python(envy_script, "--mode", "teach", "--rounds", str(rounds))
+        if ckpt:
+            cmd += ["--ckpt", ckpt]
+    else:
+        print("=== [ENVY] Calling free AI APIs ===")
+        cmd = _python(envy_script, "--mode", "collect",
+                      "--provider", provider, "--rounds", str(rounds))
+    _run(cmd)
 
 
-def gluttony(model: str = "dialogpt-small", rounds: int = 30):
-    """Distil from a small pre-trained model — heavy, prefer Colab for this."""
-    print("=== [GLUTTONY] Distilling from pre-trained model ===")
+def gluttony(model: str = "dialogpt-medium", rounds: int = 30, mode: str = "devour",
+             ckpt: str = "", pride_weight: float = 0.3, epochs: int = 3,
+             conversations: int = 25, turns: int = 6):
+    """Devour a teacher model into Aetheria.
+    Modes: devour (seed prompts), blind_devour (self-play chain), generate, distill.
+    blind_devour defaults to dialogpt-small for speed (~20-30 min on CPU)."""
+    print(f"=== [GLUTTONY] {mode.upper()} from {model} ===")
     gluttony_script = ROOT / "Original_sin" / "gluttony" / "gluttony.py"
-    _run(_python(gluttony_script, "--model", model, "--rounds", str(rounds)))
+    cmd = _python(gluttony_script, "--model", model, "--mode", mode,
+                  "--rounds", str(rounds), "--epochs", str(epochs))
+    if mode in ("devour", "blind_devour"):
+        base = ckpt or str(ROOT / "models" / "aetheria_soul.pt")
+        cmd += ["--ckpt", base, "--pride_weight", str(pride_weight)]
+    if mode == "blind_devour":
+        cmd += ["--conversations", str(conversations), "--turns", str(turns)]
+    _run(cmd)
 
 
 def clean():
@@ -117,7 +138,7 @@ def learn(epochs: int = 5, batch_size: int = 16, seq_len: int = 128, vocab_size:
     ))
 
 
-def talk(top_p: float = 0.9, temperature: float = 0.85, rep_penalty: float = 1.3, ckpt: str = ""):
+def talk(top_p: float = 0.85, temperature: float = 0.75, rep_penalty: float = 1.5, ckpt: str = ""):
     """Launch Lust for an interactive conversation with Aetheria."""
     print("=== [LUST] Launching conversation interface ===")
     lust_script = ROOT / "Original_sin" / "lust" / "lust.py"
@@ -148,42 +169,78 @@ def status():
         print(f"  checkpoint: {pt.name}  ({size_mb:.1f} MB)")
 
 
+def retrain(ckpt: str = "", out: str = "", epochs: int = 5, lr: float = 5e-5):
+    """Fine-tune a checkpoint on approved/taught feedback pairs."""
+    print("=== [RETRAIN] Fine-tuning on feedback.jsonl ===")
+    retrain_script = ROOT / "scripts" / "retrain_feedback.py"
+    base_ckpt = ckpt or str(ROOT / "models" / "aetheria_soul.pt")
+    output    = out  or base_ckpt          # default: overwrite base
+    cmd = _python(retrain_script,
+                  "--ckpt", base_ckpt,
+                  "--out", output,
+                  "--epochs", str(epochs),
+                  "--lr", str(lr))
+    _run(cmd)
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Aetheria Core — sin coordinator")
     parser.add_argument("command",
-                        choices=["envy", "gluttony", "clean", "learn", "talk", "status", "full"],
+                        choices=["envy", "gluttony", "clean", "learn", "talk", "status", "full", "retrain"],
                         help="Command to execute")
     # envy options
     parser.add_argument("--provider", default="groq", help="Envy API provider (groq|huggingface|gemini)")
+    parser.add_argument("--envy_mode", default="collect", choices=["collect", "teach"],
+                        help="collect=call external API  teach=question Aetheria locally")
     parser.add_argument("--rounds", type=int, default=None, help="Shorthand rounds for envy or gluttony")
     parser.add_argument("--envy_rounds", type=int, default=10)
-    # gluttony options (heavy — prefer Colab)
-    parser.add_argument("--gluttony_model", default="dialogpt-small")
+    # gluttony options
+    parser.add_argument("--gluttony_model", default="dialogpt-medium")
     parser.add_argument("--gluttony_rounds", type=int, default=30)
+    parser.add_argument("--gluttony_mode", default="devour",
+                        choices=["devour", "generate", "distill", "blind_devour"],
+                        help="devour=seed prompts | blind_devour=self-play chain | generate=text pairs | distill=KL")
+    parser.add_argument("--pride_weight", type=float, default=0.3,
+                        help="Corruption guard strength during devour (0=none, 1=only persona)")
+    parser.add_argument("--conversations", type=int, default=25,
+                        help="blind_devour: number of self-play conversations (default 25)")
+    parser.add_argument("--turns", type=int, default=6,
+                        help="blind_devour: turns per conversation (default 6)")
     # learn options (heavy — prefer Colab)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--seq_len", type=int, default=128)
     parser.add_argument("--vocab_size", type=int, default=8000)
-    # talk options
-    parser.add_argument("--ckpt", default="", help="Path to model checkpoint (for talk command)")
-    parser.add_argument("--top_p", type=float, default=0.9)
-    parser.add_argument("--temperature", type=float, default=0.85)
-    parser.add_argument("--rep_penalty", type=float, default=1.3)
+    # talk / retrain options
+    parser.add_argument("--ckpt", default="", help="Path to model checkpoint (for talk / retrain command)")
+    parser.add_argument("--out", default="", help="Output checkpoint path (retrain; default: overwrite --ckpt)")
+    parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate for retrain")
+    parser.add_argument("--top_p", type=float, default=0.85)
+    parser.add_argument("--temperature", type=float, default=0.75)
+    parser.add_argument("--rep_penalty", type=float, default=1.5)
     args = parser.parse_args()
 
     if args.command == "envy":
-        envy(args.provider, args.rounds if args.rounds is not None else args.envy_rounds)
+        envy(args.provider,
+             args.rounds if args.rounds is not None else args.envy_rounds,
+             mode=args.envy_mode,
+             ckpt=args.ckpt)
     elif args.command == "gluttony":
-        gluttony(args.gluttony_model, args.rounds if args.rounds is not None else args.gluttony_rounds)
+        gluttony(args.gluttony_model,
+                 args.rounds if args.rounds is not None else args.gluttony_rounds,
+                 mode=args.gluttony_mode, ckpt=args.ckpt,
+                 pride_weight=args.pride_weight, epochs=args.epochs,
+                 conversations=args.conversations, turns=args.turns)
     elif args.command == "clean":
         clean()
     elif args.command == "learn":
         learn(args.epochs, args.batch_size, args.seq_len, args.vocab_size)
     elif args.command == "talk":
         talk(args.top_p, args.temperature, args.rep_penalty, args.ckpt)
+    elif args.command == "retrain":
+        retrain(args.ckpt, args.out, args.epochs, args.lr)
     elif args.command == "status":
         status()
     elif args.command == "full":

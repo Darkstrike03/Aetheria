@@ -166,9 +166,12 @@ def collate_fn(batch):
     return x, y
 
 
-def _save_checkpoint(model, out_dir: Path, sp, vocab_size, step=None, epoch=None):
+def _save_checkpoint(model, out_dir: Path, sp, vocab_size, step=None, epoch=None, ckpt_name: str = ""):
     out_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = out_dir / (f"aetheria_ckpt_step{step}.pt" if step is not None else "aetheria_ckpt.pt")
+    if ckpt_name:
+        ckpt_path = out_dir / ckpt_name
+    else:
+        ckpt_path = out_dir / (f"aetheria_ckpt_step{step}.pt" if step is not None else "aetheria_ckpt.pt")
     tok_meta = {}
     try:
         from shutil import copy2
@@ -226,7 +229,7 @@ def train_loop(model, dataloader, optimizer, device, epochs=3, log_every=50, sav
         return
 
 
-def main(data_path: Path = DATA_PATH, sp_model: Path = SP_MODEL, vocab_size_arg: int = 4000, seq_len: int = 128, batch_size: int = 8, epochs: int = 3, device_str: str = None):
+def main(data_path: Path = DATA_PATH, sp_model: Path = SP_MODEL, vocab_size_arg: int = 4000, seq_len: int = 128, batch_size: int = 8, epochs: int = 3, device_str: str = None, ckpt_name: str = ""):
     if not data_path.exists():
         print("No data found. Please provide `data/cleaned_conversations.txt` (one conversation per paragraph).")
         return
@@ -277,8 +280,9 @@ def main(data_path: Path = DATA_PATH, sp_model: Path = SP_MODEL, vocab_size_arg:
     train_loop(model, dataloader, optimizer, device, epochs=epochs, log_every=20, save_every_steps=0, save_dir=out_dir, sp=tok_for_saving, vocab_size=vocab_size)
 
     # final save at end of training
-    _save_checkpoint(model, out_dir, tok_for_saving, vocab_size, step='final', epoch=epochs)
-    print('Saved model to', out_dir / 'aetheria_ckpt_stepfinal.pt')
+    _save_checkpoint(model, out_dir, tok_for_saving, vocab_size, step='final', epoch=epochs, ckpt_name=ckpt_name)
+    out_name = ckpt_name if ckpt_name else 'aetheria_ckpt_stepfinal.pt'
+    print('Saved model to', out_dir / out_name)
 
 
 if __name__ == '__main__':
@@ -290,5 +294,10 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=3)
     parser.add_argument('--device', type=str, default=None)
+    parser.add_argument('--ckpt_name', type=str, default='',
+                        help='Output checkpoint filename inside models/ (e.g. envy.pt). '
+                             'Defaults to aetheria_ckpt_stepfinal.pt')
     args = parser.parse_args()
-    main(data_path=Path(args.data), sp_model=Path(args.spm), vocab_size_arg=args.vocab_size, seq_len=args.seq_len, batch_size=args.batch_size, epochs=args.epochs, device_str=args.device)
+    main(data_path=Path(args.data), sp_model=Path(args.spm), vocab_size_arg=args.vocab_size,
+         seq_len=args.seq_len, batch_size=args.batch_size, epochs=args.epochs,
+         device_str=args.device, ckpt_name=args.ckpt_name)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).parents[1] / 'data'
 NOVEL_DIR = DATA_DIR / 'novels'
-OUT_PATH = DATA_DIR / 'cleaned_conversations.txt'
+OUT_PATH = DATA_DIR / 'conversations.txt'   # raw → clean_data.py → cleaned_conversations.txt
 
 
 def extract_dialogue(text: str):
